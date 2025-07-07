@@ -11,3 +11,9 @@ class Item(item_schema.Item, SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     created_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
     updated_at: datetime.datetime = Field(default_factory=datetime.datetime.now)
+
+    # Relationship
+    # receiver: Optional["receiver_model.Receiver"] = Relationship(back_populates="items")
+    # receiver_id: int = Field(default=None, foreign_key="receiver.id")
+
+    # receiver: Optional["receiver_model.Receiver"] = Relationship()

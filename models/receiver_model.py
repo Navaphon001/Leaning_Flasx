@@ -7,7 +7,7 @@ from sqlmodel import SQLModel, Field, Relationship
 from ..schemas import receiver_schema
 
 
-class Receiver(SQLModel, table=True):
+class Receiver(SQLModel, receiver_schema.Receiver, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     created_at: datetime = Field(default_factory=datetime.now)
     updated_at: datetime = Field(default_factory=datetime.now)
