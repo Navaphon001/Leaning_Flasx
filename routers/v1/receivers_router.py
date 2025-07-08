@@ -1,14 +1,13 @@
 from typing import Optional
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, EmailStr
-from datetime import datetime
+from fastapi import APIRouter, HTTPException, Depends
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 from schemas import receiver_schema
+from models import get_session, Receiver
 
 router = APIRouter(prefix="/receivers", tags=["receivers"])
 
-
-receivers_db: dict[int, dict] = {}
 
 
 @router.get(
@@ -18,19 +17,26 @@ receivers_db: dict[int, dict] = {}
     response_model=list[receiver_schema.Receiver],
 )
 async def get_receivers(
-    skip: int = 0, limit: int = 100, is_active: Optional[bool] = None
+    skip: int = 0,
+    limit: int = 100,
+    is_active: Optional[bool] = None,
+    session: AsyncSession = Depends(get_session),
 ) -> list[receiver_schema.Receiver]:
     """Get all receivers with optional pagination and filtering."""
-    receivers = list(receivers_db.values())
+    query = select(Receiver)
+
 
     # Filter by is_active if provided
     if is_active is not None:
-        receivers = [r for r in receivers if r["is_active"] == is_active]
+        query = query.where(Receiver.is_active == is_active)
 
     # Apply pagination
-    receivers = receivers[skip : skip + limit]
+    query = query.offset(skip).limit(limit)
 
-    return [receiver_schema.Receiver(**receiver) for receiver in receivers]
+    result = await session.exec(query)
+    receivers = result.all()    
+
+    return [receiver_schema.Receiver.model_validate(receiver) for receiver in receivers]
 
 
 @router.get(
@@ -39,14 +45,14 @@ async def get_receivers(
     description="Retrieve a specific receiver using its unique identifier.",
     response_model=receiver_schema.Receiver,
 )
-async def get_receiver(receiver_id: int) -> receiver_schema.Receiver:
+async def get_receiver(
+    receiver_id: int, session: AsyncSession = Depends(get_session)
+) -> receiver_schema.Receiver:
     """Get a single receiver by ID."""
-    if receiver_id not in receivers_db:
-        raise HTTPException(
-            status_code=404, detail="receiver_schema.Receiver not found"
-        )
-
-    return receiver_schema.Receiver(**receivers_db[receiver_id])
+    receiver = await session.get(Receiver, receiver_id)
+    if not receiver:
+        raise HTTPException(status_code=404, detail="Receiver not found")
+    return receiver_schema.Receiver.model_validate(receiver)
 
 
 @router.post(
@@ -58,28 +64,25 @@ async def get_receiver(receiver_id: int) -> receiver_schema.Receiver:
 )
 async def create_receiver(
     receiver: receiver_schema.ReceiverCreate,
+    session: AsyncSession = Depends(get_session),
 ) -> receiver_schema.Receiver:
     """Create a new receiver."""
-    global next_id
 
     # Check if email already exists
-    for existing_receiver in receivers_db.values():
-        if existing_receiver["email"] == receiver.email:
-            raise HTTPException(status_code=400, detail="Email already registered")
+    query = select(Receiver).where(Receiver.email == receiver.email)
+    result = await session.exec(query)
+    existing_receiver = result.first()
 
-    now = datetime.now()
-    receiver_data = {
-        "id": next_id,
-        "created_at": now,
-        "updated_at": now,
-        **receiver.model_dump(),
-    }
+    if existing_receiver:
+        raise HTTPException(status_code=400, detail="Email already registered")
 
-    receivers_db[next_id] = receiver_data
-    result = receiver_schema.Receiver(**receiver_data)
-    next_id += 1
+    # Create new receiver
+    db_receiver = Receiver(**receiver.model_dump())
+    session.add(db_receiver)
+    await session.commit()
+    await session.refresh(db_receiver)
 
-    return result
+    return receiver_schema.Receiver.model_validate(db_receiver)
 
 
 @router.put(
@@ -89,29 +92,39 @@ async def create_receiver(
     response_model=receiver_schema.Receiver,
 )
 async def update_receiver(
-    receiver_id: int, receiver_update: receiver_schema.ReceiverUpdate
+    receiver_id: int,
+    receiver_update: receiver_schema.ReceiverUpdate,
+    session: AsyncSession = Depends(get_session),
 ) -> receiver_schema.Receiver:
     """Update an existing receiver."""
-    if receiver_id not in receivers_db:
-        raise HTTPException(
-            status_code=404, detail="receiver_schema.Receiver not found"
-        )
-
-    existing_receiver = receivers_db[receiver_id]
+    db_receiver = await session.get(Receiver, receiver_id)
+    if not db_receiver:
+        raise HTTPException(status_code=404, detail="Receiver not found")
 
     # Check if email is being updated and already exists
     if receiver_update.email:
-        for rid, existing in receivers_db.items():
-            if rid != receiver_id and existing["email"] == receiver_update.email:
-                raise HTTPException(status_code=400, detail="Email already registered")
+        query = select(Receiver).where(
+            Receiver.email == receiver_update.email, Receiver.id != receiver_id
+        )
+        result = await session.exec(query)
+        existing_receiver = result.first()
+
+        if existing_receiver:
+            raise HTTPException(status_code=400, detail="Email already registered")
 
     # Update only provided fields
     update_data = receiver_update.model_dump(exclude_unset=True)
-    if update_data:
-        existing_receiver.update(update_data)
-        existing_receiver["updated_at"] = datetime.now()
+    for field, value in update_data.items():
+        setattr(db_receiver, field, value)
 
-    return receiver_schema.Receiver(**existing_receiver)
+    from datetime import datetime
+
+    db_receiver.updated_at = datetime.now()
+
+    await session.commit()
+    await session.refresh(db_receiver)
+
+    return receiver_schema.Receiver.model_validate(db_receiver)
 
 
 @router.patch(
@@ -121,7 +134,9 @@ async def update_receiver(
     response_model=receiver_schema.Receiver,
 )
 async def patch_receiver(
-    receiver_id: int, receiver_update: receiver_schema.ReceiverUpdate
+    receiver_id: int,
+    receiver_update: receiver_schema.ReceiverUpdate,
+    session: AsyncSession = Depends(get_session),
 ) -> receiver_schema.Receiver:
     """Partially update a receiver (same as PUT in this implementation)."""
     return await update_receiver(receiver_id, receiver_update)
@@ -133,14 +148,16 @@ async def patch_receiver(
     description="Delete a receiver by ID.",
     status_code=204,
 )
-async def delete_receiver(receiver_id: int):
+async def delete_receiver(
+    receiver_id: int, session: AsyncSession = Depends(get_session)
+):
     """Delete a receiver."""
-    if receiver_id not in receivers_db:
-        raise HTTPException(
-            status_code=404, detail="receiver_schema.Receiver not found"
-        )
+    db_receiver = await session.get(Receiver, receiver_id)
+    if not db_receiver:
+        raise HTTPException(status_code=404, detail="Receiver not found")
 
-    del receivers_db[receiver_id]
+    await session.delete(db_receiver)
+    await session.commit()
     return None
 
 
@@ -150,17 +167,23 @@ async def delete_receiver(receiver_id: int):
     description="Activate a receiver by setting is_active to True.",
     response_model=receiver_schema.Receiver,
 )
-async def activate_receiver(receiver_id: int) -> receiver_schema.Receiver:
+async def activate_receiver(
+    receiver_id: int, session: AsyncSession = Depends(get_session)
+) -> receiver_schema.Receiver:
     """Activate a receiver."""
-    if receiver_id not in receivers_db:
-        raise HTTPException(
-            status_code=404, detail="receiver_schema.Receiver not found"
-        )
+    db_receiver = await session.get(Receiver, receiver_id)
+    if not db_receiver:
+        raise HTTPException(status_code=404, detail="Receiver not found")
 
-    receivers_db[receiver_id]["is_active"] = True
-    receivers_db[receiver_id]["updated_at"] = datetime.now()
+    db_receiver.is_active = True
+    from datetime import datetime
 
-    return receiver_schema.Receiver(**receivers_db[receiver_id])
+    db_receiver.updated_at = datetime.now()
+
+    await session.commit()
+    await session.refresh(db_receiver)
+
+    return receiver_schema.Receiver.model_validate(db_receiver)
 
 
 @router.post(
@@ -169,14 +192,20 @@ async def activate_receiver(receiver_id: int) -> receiver_schema.Receiver:
     description="Deactivate a receiver by setting is_active to False.",
     response_model=receiver_schema.Receiver,
 )
-async def deactivate_receiver(receiver_id: int) -> receiver_schema.Receiver:
+async def deactivate_receiver(
+    receiver_id: int, session: AsyncSession = Depends(get_session)
+) -> receiver_schema.Receiver:
     """Deactivate a receiver."""
-    if receiver_id not in receivers_db:
-        raise HTTPException(
-            status_code=404, detail="receiver_schema.Receiver not found"
-        )
+    db_receiver = await session.get(Receiver, receiver_id)
+    if not db_receiver:
+        raise HTTPException(status_code=404, detail="Receiver not found")
 
-    receivers_db[receiver_id]["is_active"] = False
-    receivers_db[receiver_id]["updated_at"] = datetime.now()
+    db_receiver.is_active = False
+    from datetime import datetime
 
-    return receiver_schema.Receiver(**receivers_db[receiver_id])
+    db_receiver.updated_at = datetime.now()
+
+    await session.commit()
+    await session.refresh(db_receiver)
+
+    return receiver_schema.Receiver.model_validate(db_receiver)

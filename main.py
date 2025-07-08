@@ -1,13 +1,21 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from . import models
 
 from . import routers
 
-app = FastAPI()
-app.include_router(routers.router)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan manager."""
+    # Startup
+    await models.init_db()
+    yield
+    # Shutdown
+    await models.close_db()
 
-models.create_db_and_tables()
+app = FastAPI(lifespan=lifespan)
+app.include_router(routers.router)
 
 @app.get("/")
 def read_root():
