@@ -1,198 +1,166 @@
 from typing import Optional
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from fastapi import APIRouter, HTTPException, Depends
 from datetime import datetime
+from sqlmodel import select
+from sqlmodel.ext.asyncio.session import AsyncSession
+
+from schemas import vehicle_schema
+from models import get_session, Vehicle
 
 router = APIRouter(prefix="/vehicles", tags=["vehicles"])
-
-
-# Pydantic Models
-class VehicleBase(BaseModel):
-    license_plate: str
-    type: Optional[str] = None
-    brand: Optional[str] = None
-    color: Optional[str] = None
-    is_active: bool = True
-
-
-class VehicleCreate(VehicleBase):
-    pass
-
-
-class VehicleUpdate(BaseModel):
-    license_plate: Optional[str] = None
-    type: Optional[str] = None
-    brand: Optional[str] = None
-    color: Optional[str] = None
-    is_active: Optional[bool] = None
-
-
-class Vehicle(VehicleBase):
-    id: int
-    created_at: datetime
-    updated_at: datetime
-
-    class Config:
-        from_attributes = True
-
-
-# In-memory storage for demo purposes
-vehicles_db: dict[int, dict] = {}
-next_id = 1
 
 
 @router.get(
     "",
     summary="Get all vehicles",
     description="Retrieve a list of all vehicles with optional filtering.",
-    response_model=list[Vehicle]
+    response_model=list[vehicle_schema.Vehicle],
 )
 async def get_vehicles(
     skip: int = 0,
     limit: int = 100,
-    is_active: Optional[bool] = None
-) -> list[Vehicle]:
+    type: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    session: AsyncSession = Depends(get_session),
+) -> list[vehicle_schema.Vehicle]:
     """Get all vehicles with optional pagination and filtering."""
-    vehicles = list(vehicles_db.values())
-    
-    # Filter by is_active if provided
+    query = select(Vehicle)
+
+    # Apply filters
+    if type:
+        query = query.where(Vehicle.type.ilike(f"%{type}%"))
     if is_active is not None:
-        vehicles = [v for v in vehicles if v["is_active"] == is_active]
-    
+        query = query.where(Vehicle.is_active == is_active)
+
     # Apply pagination
-    vehicles = vehicles[skip:skip + limit]
-    
-    return [Vehicle(**vehicle) for vehicle in vehicles]
+    query = query.offset(skip).limit(limit)
+
+    result = await session.exec(query)
+    vehicles = result.all()
+
+    return [vehicle_schema.Vehicle.model_validate(vehicle) for vehicle in vehicles]
 
 
 @router.get(
     "/{vehicle_id}",
     summary="Get a vehicle by ID",
     description="Retrieve a specific vehicle using its unique identifier.",
-    response_model=Vehicle
+    response_model=vehicle_schema.Vehicle,
 )
-async def get_vehicle(vehicle_id: int) -> Vehicle:
+async def get_vehicle(
+    vehicle_id: int, session: AsyncSession = Depends(get_session)
+) -> vehicle_schema.Vehicle:
     """Get a single vehicle by ID."""
-    if vehicle_id not in vehicles_db:
+    vehicle = await session.get(Vehicle, vehicle_id)
+    if not vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
-    
-    return Vehicle(**vehicles_db[vehicle_id])
+
+    return vehicle_schema.Vehicle.model_validate(vehicle)
+
+
+@router.get(
+    "/license/{license_plate}",
+    summary="Get a vehicle by license plate",
+    description="Retrieve a specific vehicle using its license plate.",
+    response_model=vehicle_schema.Vehicle,
+)
+async def get_vehicle_by_license(
+    license_plate: str, session: AsyncSession = Depends(get_session)
+) -> vehicle_schema.Vehicle:
+    """Get a single vehicle by license plate."""
+    query = select(Vehicle).where(Vehicle.license_plate == license_plate)
+    result = await session.exec(query)
+    vehicle = result.first()
+
+    if not vehicle:
+        raise HTTPException(status_code=404, detail="Vehicle not found")
+
+    return vehicle_schema.Vehicle.model_validate(vehicle)
 
 
 @router.post(
     "",
     summary="Create a new vehicle",
     description="Create a new vehicle with the provided details.",
-    response_model=Vehicle,
-    status_code=201
+    response_model=vehicle_schema.Vehicle,
+    status_code=201,
 )
-async def create_vehicle(vehicle: VehicleCreate) -> Vehicle:
+async def create_vehicle(
+    vehicle: vehicle_schema.VehicleCreate,
+    session: AsyncSession = Depends(get_session),
+) -> vehicle_schema.Vehicle:
     """Create a new vehicle."""
-    global next_id
-    
     # Check if license plate already exists
-    for existing_vehicle in vehicles_db.values():
-        if existing_vehicle["license_plate"] == vehicle.license_plate:
-            raise HTTPException(status_code=400, detail="License plate already exists")
-    
-    now = datetime.now()
-    vehicle_data = {
-        "id": next_id,
-        "created_at": now,
-        "updated_at": now,
-        **vehicle.model_dump()
-    }
-    
-    vehicles_db[next_id] = vehicle_data
-    result = Vehicle(**vehicle_data)
-    next_id += 1
-    
-    return result
+    query = select(Vehicle).where(Vehicle.license_plate == vehicle.license_plate)
+    result = await session.exec(query)
+    existing_vehicle = result.first()
+
+    if existing_vehicle:
+        raise HTTPException(status_code=400, detail="License plate already exists")
+
+    # Create new vehicle
+    db_vehicle = Vehicle(**vehicle.model_dump())
+    session.add(db_vehicle)
+    await session.commit()
+    await session.refresh(db_vehicle)
+
+    return vehicle_schema.Vehicle.model_validate(db_vehicle)
 
 
 @router.put(
     "/{vehicle_id}",
     summary="Update an existing vehicle",
     description="Update an existing vehicle with the provided details.",
-    response_model=Vehicle
+    response_model=vehicle_schema.Vehicle,
 )
-async def update_vehicle(vehicle_id: int, vehicle_update: VehicleUpdate) -> Vehicle:
+async def update_vehicle(
+    vehicle_id: int,
+    vehicle_update: vehicle_schema.VehicleUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> vehicle_schema.Vehicle:
     """Update an existing vehicle."""
-    if vehicle_id not in vehicles_db:
+    db_vehicle = await session.get(Vehicle, vehicle_id)
+    if not db_vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
-    
-    existing_vehicle = vehicles_db[vehicle_id]
-    
+
     # Check if license plate is being updated and already exists
     if vehicle_update.license_plate:
-        for vid, existing in vehicles_db.items():
-            if vid != vehicle_id and existing["license_plate"] == vehicle_update.license_plate:
-                raise HTTPException(status_code=400, detail="License plate already exists")
-    
+        query = select(Vehicle).where(
+            Vehicle.license_plate == vehicle_update.license_plate,
+            Vehicle.id != vehicle_id,
+        )
+        result = await session.exec(query)
+        existing_vehicle = result.first()
+
+        if existing_vehicle:
+            raise HTTPException(status_code=400, detail="License plate already exists")
+
     # Update only provided fields
     update_data = vehicle_update.model_dump(exclude_unset=True)
-    if update_data:
-        existing_vehicle.update(update_data)
-        existing_vehicle["updated_at"] = datetime.now()
-    
-    return Vehicle(**existing_vehicle)
+    for field, value in update_data.items():
+        setattr(db_vehicle, field, value)
 
+    # Update timestamp
+    db_vehicle.updated_at = datetime.now()
 
-@router.patch(
-    "/{vehicle_id}",
-    summary="Partially update a vehicle",
-    description="Partially update a vehicle with the provided fields.",
-    response_model=Vehicle
-)
-async def patch_vehicle(vehicle_id: int, vehicle_update: VehicleUpdate) -> Vehicle:
-    """Partially update a vehicle (same as PUT in this implementation)."""
-    return await update_vehicle(vehicle_id, vehicle_update)
+    await session.commit()
+    await session.refresh(db_vehicle)
+
+    return vehicle_schema.Vehicle.model_validate(db_vehicle)
 
 
 @router.delete(
     "/{vehicle_id}",
     summary="Delete a vehicle",
     description="Delete a vehicle by ID.",
-    status_code=204
+    status_code=204,
 )
-async def delete_vehicle(vehicle_id: int):
+async def delete_vehicle(vehicle_id: int, session: AsyncSession = Depends(get_session)):
     """Delete a vehicle."""
-    if vehicle_id not in vehicles_db:
+    db_vehicle = await session.get(Vehicle, vehicle_id)
+    if not db_vehicle:
         raise HTTPException(status_code=404, detail="Vehicle not found")
-    
-    del vehicles_db[vehicle_id]
+
+    await session.delete(db_vehicle)
+    await session.commit()
     return None
-
-
-@router.post(
-    "/{vehicle_id}/activate",
-    summary="Activate a vehicle",
-    description="Activate a vehicle by setting is_active to True.",
-    response_model=Vehicle
-)
-async def activate_vehicle(vehicle_id: int) -> Vehicle:
-    """Activate a vehicle."""
-    if vehicle_id not in vehicles_db:
-        raise HTTPException(status_code=404, detail="Vehicle not found")
-    
-    vehicles_db[vehicle_id]["is_active"] = True
-    vehicles_db[vehicle_id]["updated_at"] = datetime.now()
-    
-    return Vehicle(**vehicles_db[vehicle_id])
-
-
-@router.post(
-    "/{vehicle_id}/deactivate",
-    summary="Deactivate a vehicle",
-    description="Deactivate a vehicle by setting is_active to False.",
-    response_model=Vehicle
-)
-async def deactivate_vehicle(vehicle_id: int) -> Vehicle:
-    """Deactivate a vehicle."""
-    if vehicle_id not in vehicles_db:
-        raise HTTPException(status_code=404, detail="Vehicle not found")
-    
-    vehicles_db[vehicle_id]["is_active"] = False
-    vehicles_db[vehicle_id]["updated_at"] = datetime.now()
-    
-    return Vehicle(**vehicles_db[vehicle_id])

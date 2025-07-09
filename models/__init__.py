@@ -10,6 +10,11 @@ from sqlalchemy.ext.asyncio import create_async_engine, AsyncEngine
 from sqlalchemy.orm import sessionmaker
 
 from .receiver_model import *
+from .sender_model import *
+from .station_model import *
+from .vehicle_model import *
+from .delivery_staff_model import *
+from .parcel_model import *
 from .item_model import *
 
 
