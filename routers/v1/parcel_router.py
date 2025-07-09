@@ -6,8 +6,8 @@ import string
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from flasx.schemas import parcel_schema
-from flasx.models import get_session, Parcel, Station
+from schemas import parcel_schema
+from models import get_session, Parcel, Station
 
 router = APIRouter(prefix="/parcels", tags=["parcels"])
 

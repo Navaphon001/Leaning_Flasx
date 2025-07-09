@@ -4,8 +4,8 @@ from datetime import datetime
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from flasx.schemas import sender_schema
-from flasx.models import get_session, Sender
+from schemas import sender_schema
+from models import get_session, Sender
 
 router = APIRouter(prefix="/senders", tags=["senders"])
 

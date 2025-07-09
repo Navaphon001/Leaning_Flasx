@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Annotated
+from datetime import datetime
 
 from sqlmodel import select
 
@@ -87,7 +87,6 @@ async def update_item(
         setattr(db_item, field, value)
 
     # Update timestamp
-    from datetime import datetime
 
     db_item.updated_at = datetime.now()
 
